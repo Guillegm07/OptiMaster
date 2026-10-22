@@ -6,7 +6,6 @@ Aplicación de escritorio para Windows 11, en español. Ejecuta `OptiGuille.exe`
 
 - Ventana única redimensionable con barra de título y controles nativos de Windows.
 - Menú lateral con seis vistas: Limpiador de Basura, Acelerador de Inicio, Liberador de RAM, Seguridad, Desfragmentar y Ajustes.
-- Colores, tarjetas, botones tipo píldora, indicadores y barras de progreso basados en el diseño solicitado.
 - Las lecturas de CPU, RAM y almacenamiento se actualizan mientras la aplicación está abierta.
 
 El porcentaje del anillo es un indicador visual calculado a partir de las lecturas de CPU, RAM y espacio usado. No mide una optimización real ni predice FPS o latencia.
