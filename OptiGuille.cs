@@ -5,8 +5,6 @@ using System.Drawing;
 using System.IO;
 using System.Management;
 using System.Runtime.InteropServices;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.ServiceProcess;
 using System.Text;
@@ -15,51 +13,9 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace OptiGuille
+namespace OptiMaster
 {
-    [DataContract]
-    public class RegistrySnapshot
-    {
-        [DataMember] public bool Exists { get; set; }
-        [DataMember] public int Value { get; set; }
-    }
-
-    [DataContract]
-    public class ServiceSnapshot
-    {
-        [DataMember] public string Name { get; set; }
-        [DataMember] public int StartMode { get; set; }
-        [DataMember] public bool WasRunning { get; set; }
-    }
-
-    [DataContract]
-    public class AppBackup
-    {
-        [DataMember] public Dictionary<string, RegistrySnapshot> Registry = new Dictionary<string, RegistrySnapshot>();
-        [DataMember] public string PowerScheme;
-        [DataMember] public Dictionary<string, List<ServiceSnapshot>> Services = new Dictionary<string, List<ServiceSnapshot>>();
-    }
-
-    public class ComponentSpec
-    {
-        public string Id, Title, Description, Warning, ImpactText;
-        public string[] Services;
-        public int Impact;
-        public ComponentSpec(string id, string title, string description, string warning, string impactText, int impact, params string[] services)
-        {
-            Id = id; Title = title; Description = description; Warning = warning; ImpactText = impactText; Impact = impact; Services = services;
-        }
-    }
-
-    public class StartupEntry
-    {
-        public string Name;
-        public string Command;
-        public string Location;
-        public bool IsHKLM;
-    }
-
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         const string GameBar = @"Software\Microsoft\GameBar";
         const string GameConfig = @"System\GameConfigStore";
@@ -67,10 +23,13 @@ namespace OptiGuille
         const string WuPolicyPath = @"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
         const string DriverSearchPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching";
 
-        readonly string dataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "OptiGuille");
-        readonly string backupPath;
+        readonly string dataFolder = AppPaths.DataDirectory;
+        readonly BackupStore backupStore = new BackupStore(AppPaths.BackupFile);
+        readonly IProcessRunner processRunner = new ProcessRunner();
+        readonly SystemMetricsService metrics = new SystemMetricsService();
+        readonly UninstallerService uninstallerService;
 
-        readonly List<ComponentSpec> components = new List<ComponentSpec>();
+        readonly List<ComponentSpec> components;
         AppBackup backup;
 
         Panel pageHost;
@@ -79,7 +38,6 @@ namespace OptiGuille
         readonly Dictionary<string, string> pageSubtitles = new Dictionary<string, string>();
         readonly Dictionary<string, NavigationButton> navigation = new Dictionary<string, NavigationButton>();
 
-        PerformanceCounter cpuCounter;
         TelemetryCard cpuCard, ramCard, storageCard, ramLiveChart;
         Label memorySummary, standbySummary, cleanStatus, restoreStatus;
         DonutGauge healthGauge, ramGauge;
@@ -103,40 +61,11 @@ namespace OptiGuille
         readonly Dictionary<int, long> originalAffinities = new Dictionary<int, long>();
         readonly HashSet<int> suspendedProcesses = new HashSet<int>();
 
-        [DllImport("user32.dll")] static extern bool ReleaseCapture();
-        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
-        [DllImport("psapi.dll")] static extern int EmptyWorkingSet(IntPtr hwProc);
-        [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr processHandle);
-        [DllImport("ntdll.dll")] static extern int NtResumeProcess(IntPtr processHandle);
-        [DllImport("ntdll.dll")] static extern int NtSetSystemInformation(int InfoClass, ref int Info, int Length);
-        [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)] static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out long lpLuid);
-        [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, ref TOKEN_PRIVILEGES NewState, int BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
-        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr hObject);
-        [DllImport("Shell32.dll", CharSet = CharSet.Unicode)] static extern int SHEmptyRecycleBin(IntPtr hwnd, string rootPath, uint flags);
-
-        [StructLayout(LayoutKind.Sequential, Pack = 1)]
-        struct TOKEN_PRIVILEGES
-        {
-            public int PrivilegeCount;
-            public long Luid;
-            public int Attributes;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        struct MemoryStatus
-        {
-            public uint Length, MemoryLoad;
-            public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual;
-        }
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        static extern bool GlobalMemoryStatusEx(ref MemoryStatus buffer);
-
         public MainForm()
         {
-            backupPath = Path.Combine(dataFolder, "backup.json");
-            Text = "OptiGuille";
-            FormBorderStyle = FormBorderStyle.None;
+            uninstallerService = new UninstallerService(processRunner);
+            Text = "OptiMaster";
+            FormBorderStyle = FormBorderStyle.Sizable;
             AutoScaleMode = AutoScaleMode.None;
 
             Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
@@ -154,13 +83,7 @@ namespace OptiGuille
             Directory.CreateDirectory(dataFolder);
             Load += delegate { DwmNative.ApplyModernFrame(this); };
 
-            components.Add(new ComponentSpec("DiagTrack", "Telemetría de Windows", "Detiene el envío de diagnósticos en segundo plano.", "Desactiva el envío de informes de uso a Microsoft.", "Bajo", 2, "DiagTrack"));
-            components.Add(new ComponentSpec("WSearch", "Indexación de búsqueda", "Evita lecturas constantes en disco deteniendo el indizador.", "Las búsquedas en el explorador serán más lentas.", "Moderado", 3, "WSearch"));
-            components.Add(new ComponentSpec("SysMain", "SysMain (Superfetch)", "Libera ciclos de lectura y RAM en unidades NVMe/SSD.", "Recomendado desactivar únicamente si usas SSD.", "Moderado", 3, "SysMain"));
-            components.Add(new ComponentSpec("Spooler", "Cola de impresión", "Detiene el servicio de impresoras si no imprimes.", "Las impresoras no funcionarán mientras esté inactivo.", "Bajo", 2, "Spooler"));
-            components.Add(new ComponentSpec("XboxServices", "Servicios de red Xbox", "Apaga demonios de Xbox Live y guardado en nube.", "Afecta a la app Xbox y partidas de Game Pass.", "Bajo", 2, "XblAuthManager", "XblGameSave", "XboxNetApiSvc"));
-
-            try { cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); cpuCounter.NextValue(); } catch { }
+            components = ComponentCatalog.Create();
 
             BuildInterface();
 
@@ -169,6 +92,7 @@ namespace OptiGuille
                 if (powerPlanTimer != null) powerPlanTimer.Stop();
                 if (monitorTimer != null) monitorTimer.Stop();
                 RestoreAutomaticPowerPlan();
+                metrics.Dispose();
             };
         }
 
@@ -178,8 +102,8 @@ namespace OptiGuille
             {
                 if (e.Button == MouseButtons.Left)
                 {
-                    ReleaseCapture();
-                    SendMessage(Handle, 0xA1, 0x2, 0);
+                    NativeMethods.ReleaseCapture();
+                    NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
                 }
             };
         }
@@ -187,15 +111,15 @@ namespace OptiGuille
         void BuildInterface()
         {
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 295));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 21));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 79));
             Controls.Add(root);
 
             // SIDEBAR IZQUIERDO
             var sideLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = UiTheme.BgSidebar, Padding = new Padding(0, 8, 0, 16), Margin = Padding.Empty };
-            sideLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
-            sideLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            sideLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
+            sideLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 12));
+            sideLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 78));
+            sideLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 10));
             root.Controls.Add(sideLayout, 0, 0);
 
             var logo = new LogoControl { Dock = DockStyle.Fill };
@@ -204,23 +128,21 @@ namespace OptiGuille
 
             var navPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(0, 4, 0, 0), BackColor = UiTheme.BgSidebar };
             EnableDrag(navPanel);
+            navPanel.SizeChanged += delegate { LayoutNavigation(navPanel); };
             sideLayout.Controls.Add(navPanel, 0, 1);
 
-            var sideFooter = new RoundedPanel { Size = new Size(267, 54), FillColor = Color.FromArgb(14, 22, 38), BorderColor = Color.FromArgb(26, 65, 65), Radius = 10, Margin = new Padding(14, 4, 14, 0) };
-            sideFooter.Controls.Add(new Label { Text = "MODO ADMINISTRADOR", Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold), ForeColor = UiTheme.Mint, BackColor = Color.FromArgb(14, 22, 38), AutoSize = true, Location = new Point(14, 9) });
-            sideFooter.Controls.Add(new Label { Text = "Copia de seguridad activa", Font = new Font("Segoe UI", 8f), ForeColor = UiTheme.TextMuted, BackColor = Color.FromArgb(14, 22, 38), AutoSize = true, Location = new Point(14, 28) });
+            var sideFooter = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardAlt, BorderColor = UiTheme.PurpleSoft, Radius = 12, Margin = new Padding(14, 4, 14, 0) };
+            sideFooter.Controls.Add(new Label { Text = "MODO ADMINISTRADOR", Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold), ForeColor = UiTheme.Cyan, BackColor = UiTheme.CardAlt, AutoSize = true, Location = new Point(14, 9) });
+            sideFooter.Controls.Add(new Label { Text = "Protección de cambios activa", Font = new Font("Segoe UI", 8f), ForeColor = UiTheme.TextMuted, BackColor = UiTheme.CardAlt, AutoSize = true, Location = new Point(14, 28) });
             sideLayout.Controls.Add(sideFooter, 0, 2);
 
             // PANEL PRINCIPAL DERECHO
             var main = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = UiTheme.BgCanvas, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 10));
             main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             root.Controls.Add(main, 1, 0);
 
-            topHeader = new TopHeaderBar();
-            topHeader.MinimizeClicked += delegate { WindowState = FormWindowState.Minimized; };
-            topHeader.MaximizeClicked += delegate { WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; };
-            topHeader.CloseClicked += delegate { Close(); };
+            topHeader = new TopHeaderBar { ShowWindowControls = false };
             main.Controls.Add(topHeader, 0, 0);
 
             var content = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.BgCanvas, Padding = new Padding(26, 16, 26, 20) };
@@ -231,12 +153,14 @@ namespace OptiGuille
 
             AddPage("Limpiador de Basura", "Limpieza profunda, cachés y telemetría en vivo", BuildDashboard(), navPanel, 0);
             AddPage("Acelerador de Inicio", "Gestión de arranque, impacto y retraso automático", BuildStartupPage(), navPanel, 1);
-            AddPage("Liberador de RAM", "Purga de Standby List, Working Set y procesos", BuildMemoryPage(), navPanel, 2);
+            AddPage("Liberador de RAM", "Libera memoria y gestiona aplicaciones activas", BuildMemoryPage(), navPanel, 2);
+            AddPage("Desinstalador", "Elimina aplicaciones y sus restos", BuildUninstallerPage(), navPanel, 7);
             AddPage("Suite NVIDIA", "Limpieza DDU de drivers e instalación limpia a medida", BuildNvidiaPage(), navPanel, 4);
-            AddPage("Seguridad", "Controladores WHQL, red TCP/IP, SMART y reparación", BuildSecurityPage(), navPanel, 3);
-            AddPage("Desfragmentar", "Mapa de bloques NVMe/SSD TRIM y duplicados SHA-256", BuildStoragePage(), navPanel, 5);
+            AddPage("Seguridad", "Actualizaciones, red, estado de unidades y reparación", BuildSecurityPage(), navPanel, 3);
+            AddPage("Desfragmentar", "Mantenimiento de la unidad y archivos duplicados", BuildStoragePage(), navPanel, 5);
             AddPage("Ajustes", "Modo Juego dinámico y servicios en segundo plano", BuildSettingsPage(), navPanel, 6);
 
+            LayoutNavigation(navPanel);
             ShowPage("Limpiador de Basura");
         }
 
@@ -250,14 +174,25 @@ namespace OptiGuille
 
             var button = new NavigationButton(key, subtitle, icon)
             {
-                Width = 295,
-                Height = 52,
+                Width = Math.Max(1, navPanel.ClientSize.Width),
+                Height = 56,
                 Margin = new Padding(0, 1, 0, 1),
                 Tag = key
             };
             button.Click += delegate { ShowPage((string)button.Tag); };
             navigation[key] = button;
             navPanel.Controls.Add(button);
+        }
+
+        void LayoutNavigation(FlowLayoutPanel navPanel)
+        {
+            if (navPanel.ClientSize.Width < 2) return;
+            int itemHeight = Math.Max(48, Math.Min(72, (navPanel.ClientSize.Height - 12) / Math.Max(1, navPanel.Controls.Count)));
+            foreach (Control item in navPanel.Controls)
+            {
+                item.Width = navPanel.ClientSize.Width;
+                item.Height = itemHeight;
+            }
         }
 
         void ShowPage(string title)
@@ -280,27 +215,27 @@ namespace OptiGuille
         {
             var page = NewModule();
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 165f));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 155f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 56f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 23f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 21f));
 
-            var heroCard = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardBg, TopAccentColor = UiTheme.Cyan, Radius = 14, Margin = new Padding(0, 0, 0, 14), Padding = new Padding(22, 18, 22, 18) };
+            var heroCard = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardBg, TopAccentColor = UiTheme.Purple, Radius = 16, Margin = new Padding(0, 0, 0, 14), Padding = new Padding(22, 18, 22, 18) };
             var heroGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiTheme.CardBg, Margin = Padding.Empty };
-            heroGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260f));
-            heroGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            heroGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30f));
+            heroGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70f));
             heroCard.Controls.Add(heroGrid);
 
             healthGauge = new DonutGauge { Dock = DockStyle.Fill, Value = 88, Margin = new Padding(0, 0, 14, 0) };
             heroGrid.Controls.Add(healthGauge, 0, 0);
 
             var rightHero = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = UiTheme.CardBg, Margin = Padding.Empty, Padding = new Padding(8, 2, 4, 2) };
-            rightHero.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
-            rightHero.RowStyles.Add(new RowStyle(SizeType.Absolute, 26f));
-            rightHero.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            rightHero.RowStyles.Add(new RowStyle(SizeType.Absolute, 52f));
+            rightHero.RowStyles.Add(new RowStyle(SizeType.Percent, 16f));
+            rightHero.RowStyles.Add(new RowStyle(SizeType.Percent, 12f));
+            rightHero.RowStyles.Add(new RowStyle(SizeType.Percent, 53f));
+            rightHero.RowStyles.Add(new RowStyle(SizeType.Percent, 19f));
 
             var lblHeroTitle = new Label { Text = "Optimización integral de almacenamiento y caché", Font = new Font("Segoe UI", 14.5f, FontStyle.Bold), ForeColor = UiTheme.TextLight, BackColor = UiTheme.CardBg, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-            cleanStatus = new Label { Text = "Marca los objetivos de limpieza para liberar espacio y purgar memoria en espera.", Font = new Font("Segoe UI", 9.2f), ForeColor = UiTheme.TextMuted, BackColor = UiTheme.CardBg, Dock = DockStyle.Fill, TextAlign = ContentAlignment.TopLeft };
+            cleanStatus = new Label { Text = "Elige qué elementos quieres limpiar para recuperar espacio y mejorar la respuesta del equipo.", Font = new Font("Segoe UI", 9.2f), ForeColor = UiTheme.TextMuted, BackColor = UiTheme.CardBg, Dock = DockStyle.Fill, TextAlign = ContentAlignment.TopLeft };
             rightHero.Controls.Add(lblHeroTitle, 0, 0);
             rightHero.Controls.Add(cleanStatus, 0, 1);
 
@@ -426,25 +361,13 @@ namespace OptiGuille
         void UpdateMetrics()
         {
             if (IsDisposed || cpuCard == null) return;
-            float cpu = 0;
-            try { if (cpuCounter != null) cpu = Math.Max(0, Math.Min(100, cpuCounter.NextValue())); } catch { }
-
-            var memory = new MemoryStatus();
-            memory.Length = (uint)Marshal.SizeOf(typeof(MemoryStatus));
-            GlobalMemoryStatusEx(ref memory);
-            double ram = memory.TotalPhys == 0 ? 0 : (double)(memory.TotalPhys - memory.AvailPhys) * 100.0 / memory.TotalPhys;
-            double usedGb = (memory.TotalPhys - memory.AvailPhys) / 1073741824.0;
-            double totalGb = memory.TotalPhys / 1073741824.0;
-
-            long total = 0, free = 0;
-            try
-            {
-                var drive = new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory));
-                if (drive.IsReady) { total = drive.TotalSize; free = drive.AvailableFreeSpace; }
-            }
-            catch { }
-            double usedDisk = total == 0 ? 0 : (double)(total - free) * 100.0 / total;
-            double freeDiskGb = free / 1073741824.0;
+            var snapshot = metrics.Read();
+            float cpu = snapshot.CpuUsage;
+            double ram = snapshot.RamUsage;
+            double usedGb = snapshot.UsedRamGb;
+            double totalGb = snapshot.TotalRamGb;
+            double usedDisk = snapshot.DiskUsage;
+            double freeDiskGb = snapshot.FreeDiskGb;
 
             cpuCard.PushSample((int)cpu, cpu.ToString("0") + "%", "Carga de núcleos en vivo");
             ramCard.PushSample((int)ram, ram.ToString("0") + "%", String.Format("{0:0.0} GB / {1:0.0} GB activos", usedGb, totalGb));
@@ -833,7 +756,7 @@ namespace OptiGuille
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error al configurar la política de Windows Update: " + ex.Message, "OptiGuille");
+                MessageBox.Show("Error al configurar la política de Windows Update: " + ex.Message, "OptiMaster");
             }
         }
 
@@ -850,7 +773,7 @@ namespace OptiGuille
             else
             {
                 var res = MessageBox.Show(
-                    "En Modo Seguro Windows carga únicamente los controladores esenciales, permitiendo que OptiGuille elimine el 100% de los archivos y servicios de NVIDIA sin bloqueos.\r\n\r\n¿Configurar el próximo arranque en Modo Seguro y reiniciar ahora?",
+                    "En Modo Seguro Windows carga únicamente los controladores esenciales, permitiendo que OptiMaster elimine el 100% de los archivos y servicios de NVIDIA sin bloqueos.\r\n\r\n¿Configurar el próximo arranque en Modo Seguro y reiniciar ahora?",
                     "Reiniciar en Modo Seguro",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Information);
@@ -859,7 +782,7 @@ namespace OptiGuille
                 {
                     SetWuDriverBlock(true);
                     RunCommand("bcdedit.exe", "/set {current} safeboot minimal");
-                    RunCommand("shutdown.exe", "/r /t 4 /c \"OptiGuille: Reiniciando en Modo Seguro para limpieza de driver NVIDIA.\"");
+                    RunCommand("shutdown.exe", "/r /t 4 /c \"OptiMaster: Reiniciando en Modo Seguro para limpieza de driver NVIDIA.\"");
                 }
             }
         }
@@ -1005,7 +928,7 @@ namespace OptiGuille
 
             if (rebootAfter)
             {
-                RunCommand("shutdown.exe", "/r /t 5 /c \"OptiGuille: Limpieza de driver NVIDIA finalizada. Reiniciando el equipo...\"");
+                RunCommand("shutdown.exe", "/r /t 5 /c \"OptiMaster: Limpieza de driver NVIDIA finalizada. Reiniciando el equipo...\"");
                 MessageBox.Show(report.ToString() + "\r\nEl equipo se reiniciará en 5 segundos.", "Limpieza completada", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
@@ -1117,7 +1040,7 @@ namespace OptiGuille
             }
             else if (choice == DialogResult.No)
             {
-                string destDir = Path.Combine(Path.GetTempPath(), "OptiGuille_NVDownload");
+                string destDir = Path.Combine(Path.GetTempPath(), "OptiMaster_NVDownload");
                 Directory.CreateDirectory(destDir);
                 await RunCommandVisibleAsync("winget.exe", "download --id Nvidia.GeForceExperience -d \"" + destDir + "\" --accept-package-agreements --accept-source-agreements", "Descarga de paquete NVIDIA");
             }
@@ -1139,12 +1062,12 @@ namespace OptiGuille
                 {
                     fbd.Description = "Elige la carpeta donde guardar el instalador personalizado reutilizable";
                     if (fbd.ShowDialog(this) != DialogResult.OK) return;
-                    targetOutputFolder = Path.Combine(fbd.SelectedPath, "NVIDIA_CleanPackage_OptiGuille");
+                    targetOutputFolder = Path.Combine(fbd.SelectedPath, "NVIDIA_CleanPackage_OptiMaster");
                 }
             }
             else
             {
-                targetOutputFolder = Path.Combine(Path.GetTempPath(), "OptiGuille_NVClean_Work");
+                targetOutputFolder = Path.Combine(Path.GetTempPath(), "OptiMaster_NVClean_Work");
             }
 
             btn1.Enabled = false;
@@ -1243,11 +1166,11 @@ namespace OptiGuille
                     if (File.Exists(setupCfg))
                         SanitizeNvidiaSetupCfg(setupCfg, foldersToRemove);
 
-                    // 4. Generar script reutilizable Instalar_Limpio_OptiGuille.bat
+                    // 4. Generar script reutilizable de instalación limpia
                     string flags = (optClean ? "-clean " : "") + (optSilent ? "-passive -noeula -nofinish " : "-noeula ");
                     var bat = new StringBuilder();
                     bat.AppendLine("@echo off");
-                    bat.AppendLine("title Instalador Limpio NVIDIA - OptiGuille");
+                    bat.AppendLine("title Instalador Limpio NVIDIA - OptiMaster");
                     bat.AppendLine("echo Aplicando instalacion limpia personalizada de NVIDIA...");
                     bat.AppendLine("cd /d \"%~dp0\"");
                     bat.AppendLine("start /wait \"\" \"setup.exe\" " + flags.Trim());
@@ -1261,7 +1184,7 @@ namespace OptiGuille
                         bat.AppendLine("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\nvlddmkm\" /v \"EnableResizableBar\" /t REG_DWORD /d 1 /f >nul 2>&1");
                     }
                     bat.AppendLine("echo Instalacion completada.");
-                    File.WriteAllText(Path.Combine(pkgRoot, "Instalar_Limpio_OptiGuille.bat"), bat.ToString(), Encoding.Default);
+                    File.WriteAllText(Path.Combine(pkgRoot, "Instalar_Limpio_OptiMaster.bat"), bat.ToString(), Encoding.Default);
 
                     // 5. Si el usuario pidió instalar ahora, lanzar setup.exe con los argumentos
                     if (!saveReusableCopy)
@@ -1319,7 +1242,7 @@ namespace OptiGuille
             if (saveReusableCopy)
             {
                 MessageBox.Show(
-                    String.Format("Instalador personalizado reutilizable creado en:\r\n{0}\r\n\r\n• Módulos innecesarios eliminados: {1}\r\n• Espacio reducido: {2:0.0} MB\r\n• Incluye 'Instalar_Limpio_OptiGuille.bat' para futuras instalaciones con un clic.", targetOutputFolder, removedDirsCount, savedMb),
+                    String.Format("Instalador personalizado reutilizable creado en:\r\n{0}\r\n\r\n• Módulos innecesarios eliminados: {1}\r\n• Espacio reducido: {2:0.0} MB\r\n• Incluye 'Instalar_Limpio_OptiMaster.bat' para futuras instalaciones con un clic.", targetOutputFolder, removedDirsCount, savedMb),
                     "Instalador personalizado creado",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -1453,7 +1376,7 @@ namespace OptiGuille
             var delayBtn = new ModernButton("Retrasar inicio (+30s)", true) { Width = 200, Margin = new Padding(0, 0, 12, 0) };
             delayBtn.Click += delegate
             {
-                if (table.SelectedRow == null) { MessageBox.Show("Selecciona una aplicación de la tabla.", "OptiGuille"); return; }
+                if (table.SelectedRow == null) { MessageBox.Show("Selecciona una aplicación de la tabla.", "OptiMaster"); return; }
                 DelayStartupEntry((StartupEntry)table.SelectedRow.Tag);
                 refreshStartup();
             };
@@ -1524,20 +1447,20 @@ namespace OptiGuille
                     if (key != null) key.DeleteValue(entry.Name, false);
                 }
             }
-            catch (Exception ex) { MessageBox.Show("Error al modificar el inicio: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("Error al modificar el inicio: " + ex.Message, "OptiMaster"); }
         }
 
         void DelayStartupEntry(StartupEntry entry)
         {
             try
             {
-                string taskName = "OptiGuille_Delay_" + Regex.Replace(entry.Name, @"[^a-zA-Z0-9_]", "");
+                string taskName = "OptiMaster_Delay_" + Regex.Replace(entry.Name, @"[^a-zA-Z0-9_]", "");
                 string args = String.Format("/Create /F /TN \"{0}\" /TR \"{1}\" /SC ONLOGON /DELAY 0000:30", taskName, entry.Command.Replace("\"", "\\\""));
                 RunCommand("schtasks.exe", args);
                 RemoveStartupEntry(entry);
                 MessageBox.Show(entry.Name + " se ejecutará 30 segundos después de iniciar sesión.", "Inicio retrasado");
             }
-            catch (Exception ex) { MessageBox.Show("No se pudo retrasar la aplicación: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("No se pudo retrasar la aplicación: " + ex.Message, "OptiMaster"); }
         }
 
         void ShowContextMenuAudit()
@@ -1560,6 +1483,151 @@ namespace OptiGuille
                 sb.AppendLine();
             }
             ShowTextDialog("Extensiones del menú contextual del explorador", sb.ToString());
+        }
+
+        // ==========================================
+        // VISTA: DESINSTALADOR
+        // ==========================================
+        Control BuildUninstallerPage()
+        {
+            var page = NewModule();
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+
+            var header = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardBg, TopAccentColor = UiTheme.Purple, Radius = 12, Padding = new Padding(22, 14, 22, 14), Margin = new Padding(0, 0, 0, 14) };
+            var title = new Label { Text = "Desinstalador", Font = new Font("Segoe UI", 15f, FontStyle.Bold), ForeColor = UiTheme.TextLight, BackColor = UiTheme.CardBg, AutoSize = true, Location = new Point(22, 14) };
+            var summary = new Label { Text = "Cargando aplicaciones instaladas...", Font = new Font("Segoe UI", 9.4f), ForeColor = UiTheme.TextMuted, BackColor = UiTheme.CardBg, AutoSize = true, Location = new Point(22, 50) };
+            header.Controls.Add(title);
+            header.Controls.Add(summary);
+            layout.Controls.Add(header, 0, 0);
+
+            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 67f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33f));
+
+            var applicationList = new CheckedListBox
+            {
+                Dock = DockStyle.Fill,
+                CheckOnClick = true,
+                IntegralHeight = false,
+                BackColor = UiTheme.CardBg,
+                ForeColor = UiTheme.TextLight,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Segoe UI", 9.5f),
+                Margin = new Padding(0, 0, 12, 0)
+            };
+            body.Controls.Add(applicationList, 0, 0);
+
+            var actionsCard = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardBg, TopAccentColor = UiTheme.Cyan, Radius = 12, Padding = new Padding(16), Margin = new Padding(12, 0, 0, 0) };
+            var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiTheme.CardBg, Padding = Padding.Empty, Margin = Padding.Empty };
+            var actionInfo = new Label { Text = "Marca una o varias aplicaciones y elige una acción.", ForeColor = UiTheme.TextMuted, BackColor = UiTheme.CardBg, Font = new Font("Segoe UI", 9f), Size = new Size(270, 44), Margin = new Padding(0, 0, 0, 10) };
+            actions.Controls.Add(actionInfo);
+
+            Action refresh = delegate
+            {
+                applicationList.Items.Clear();
+                var entries = uninstallerService.GetEntries();
+                foreach (var entry in entries) applicationList.Items.Add(entry, false);
+                summary.Text = entries.Count + " elementos detectados. Marca los que quieras eliminar.";
+            };
+
+            var uninstall = new PillButton("Desinstalar seleccionadas") { Width = 270, Height = 42, Margin = new Padding(0, 0, 0, 10), BackColor = UiTheme.CardBg };
+            uninstall.Click += async delegate
+            {
+                var selected = GetCheckedUninstallEntries(applicationList);
+                if (selected.Count == 0) { MessageBox.Show("Marca al menos una aplicación.", "Desinstalador"); return; }
+                if (MessageBox.Show("Se iniciará la desinstalación de " + selected.Count + " elemento(s). Sigue las indicaciones que aparezcan.", "Confirmar desinstalación", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+                int started = 0, removed = 0;
+                foreach (var entry in selected)
+                {
+                    try
+                    {
+                        if (entry.Type == UninstallEntryType.WindowsApp)
+                        {
+                            await Task.Run(delegate { return uninstallerService.RemoveWindowsApp(entry); });
+                            removed++;
+                        }
+                        else if (entry.Type == UninstallEntryType.BrowserExtension)
+                        {
+                            uninstallerService.RemoveBrowserExtension(entry);
+                            removed++;
+                        }
+                        else
+                        {
+                            uninstallerService.LaunchUninstaller(entry);
+                            started++;
+                        }
+                    }
+                    catch { }
+                }
+                summary.Text = "Acción iniciada: " + started + " programa(s) y " + removed + " elemento(s) eliminados.";
+                refresh();
+            };
+
+            var force = new ModernButton("Forzar eliminación") { Width = 270, Height = 40, Margin = new Padding(0, 0, 0, 10) };
+            force.Click += delegate
+            {
+                var selected = GetCheckedUninstallEntries(applicationList);
+                if (selected.Count != 1) { MessageBox.Show("Marca solo una aplicación para esta acción.", "Desinstalador"); return; }
+                var entry = selected[0];
+                if (entry.Type != UninstallEntryType.Program || String.IsNullOrWhiteSpace(entry.InstallLocation)) { MessageBox.Show("La eliminación forzosa solo está disponible para programas con una carpeta de instalación conocida.", "Desinstalador"); return; }
+                if (MessageBox.Show("Se eliminarán los archivos y la entrada de " + entry.Name + ". Esta acción no se puede deshacer. ¿Continuar?", "Forzar eliminación", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                try
+                {
+                    int removed = uninstallerService.ForceRemove(entry);
+                    summary.Text = removed > 0 ? "Se eliminaron los restos disponibles de " + entry.Name + "." : "No se encontraron restos que eliminar.";
+                    refresh();
+                }
+                catch (Exception ex) { MessageBox.Show("No se pudo completar la eliminación: " + ex.Message, "Desinstalador"); }
+            };
+
+            var cleanRemains = new ModernButton("Limpiar restos vacíos") { Width = 270, Height = 40, Margin = new Padding(0, 0, 0, 10) };
+            cleanRemains.Click += delegate
+            {
+                var selected = GetCheckedUninstallEntries(applicationList);
+                if (selected.Count == 0) { MessageBox.Show("Marca las aplicaciones cuyos restos quieres revisar.", "Desinstalador"); return; }
+                int removed = uninstallerService.RemoveEmptyResidualFolders(selected);
+                summary.Text = removed == 0 ? "No se encontraron carpetas vacías para eliminar." : removed + " carpeta(s) vacía(s) eliminada(s).";
+                refresh();
+            };
+
+            var cleanTemp = new ModernButton("Limpiar archivos temporales") { Width = 270, Height = 40, Margin = new Padding(0, 0, 0, 10) };
+            cleanTemp.Click += async delegate { await CleanTemporaryFilesAsync(uninstall); };
+            var shred = new ModernButton("Destructor de archivos") { Width = 270, Height = 40, Margin = new Padding(0, 0, 0, 10) };
+            shred.Click += delegate { ShredSelectedFile(); };
+            var update = new ModernButton("Actualizar lista") { Width = 270, Height = 40 };
+            update.Click += delegate { refresh(); };
+
+            actions.Controls.Add(uninstall);
+            actions.Controls.Add(force);
+            actions.Controls.Add(cleanRemains);
+            actions.Controls.Add(cleanTemp);
+            actions.Controls.Add(shred);
+            actions.Controls.Add(update);
+            actionsCard.Controls.Add(actions);
+            body.Controls.Add(actionsCard, 1, 0);
+            layout.Controls.Add(body, 0, 1);
+
+            var footer = new Label { Text = "Las aplicaciones de Windows y los complementos se eliminan directamente. Los programas pueden mostrar su propio asistente de desinstalación.", Dock = DockStyle.Fill, ForeColor = UiTheme.TextMuted, BackColor = UiTheme.BgCanvas, TextAlign = ContentAlignment.MiddleLeft };
+            layout.Controls.Add(footer, 0, 2);
+
+            refresh();
+            page.Controls.Add(layout);
+            return page;
+        }
+
+        List<UninstallEntry> GetCheckedUninstallEntries(CheckedListBox list)
+        {
+            var entries = new List<UninstallEntry>();
+            foreach (object item in list.CheckedItems)
+            {
+                var entry = item as UninstallEntry;
+                if (entry != null) entries.Add(entry);
+            }
+            return entries;
         }
 
         // ==========================================
@@ -1592,7 +1660,7 @@ namespace OptiGuille
             };
             standbySummary = new Label
             {
-                Text = "Vacía los conjuntos de trabajo (Working Set) y la memoria en espera (Standby List) retenida por Windows.",
+                Text = "Libera memoria retenida por aplicaciones para que el equipo responda con mayor fluidez.",
                 ForeColor = UiTheme.TextMuted,
                 BackColor = UiTheme.CardBg,
                 Font = new Font("Segoe UI", 9f),
@@ -1638,7 +1706,7 @@ namespace OptiGuille
                         FillProcessList(table);
                     }
                 }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "OptiGuille"); }
+                catch (Exception ex) { MessageBox.Show(ex.Message, "OptiMaster"); }
             };
 
             var suspendBtn = new ModernButton("Hibernar / Reanudar") { Width = 165, Margin = new Padding(0, 0, 10, 0) };
@@ -1660,7 +1728,7 @@ namespace OptiGuille
                 if (MessageBox.Show("¿Finalizar el proceso " + name + "?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 {
                     try { Process.GetProcessById((int)table.SelectedRow.Tag).Kill(); FillProcessList(table); }
-                    catch (Exception ex) { MessageBox.Show(ex.Message, "OptiGuille"); }
+                    catch (Exception ex) { MessageBox.Show(ex.Message, "OptiMaster"); }
                 }
             };
 
@@ -1677,26 +1745,26 @@ namespace OptiGuille
 
         void PurgeMemory(bool notify)
         {
-            var before = new MemoryStatus();
-            before.Length = (uint)Marshal.SizeOf(typeof(MemoryStatus));
-            GlobalMemoryStatusEx(ref before);
+            var before = new NativeMethods.MemoryStatus();
+            before.Length = (uint)Marshal.SizeOf(typeof(NativeMethods.MemoryStatus));
+            NativeMethods.GlobalMemoryStatusEx(ref before);
 
             foreach (var p in Process.GetProcesses())
             {
-                try { EmptyWorkingSet(p.Handle); } catch { }
+                try { NativeMethods.EmptyWorkingSet(p.Handle); } catch { }
             }
 
             try
             {
                 EnablePrivilege("SeProfileSingleProcessPrivilege");
                 int cmd = 4;
-                NtSetSystemInformation(80, ref cmd, sizeof(int));
+                NativeMethods.NtSetSystemInformation(80, ref cmd, sizeof(int));
             }
             catch { }
 
-            var after = new MemoryStatus();
-            after.Length = (uint)Marshal.SizeOf(typeof(MemoryStatus));
-            GlobalMemoryStatusEx(ref after);
+            var after = new NativeMethods.MemoryStatus();
+            after.Length = (uint)Marshal.SizeOf(typeof(NativeMethods.MemoryStatus));
+            NativeMethods.GlobalMemoryStatusEx(ref after);
 
             double freedMb = after.AvailPhys > before.AvailPhys ? (after.AvailPhys - before.AvailPhys) / 1048576.0 : 142.0;
             UpdateMetrics();
@@ -1709,15 +1777,15 @@ namespace OptiGuille
         void EnablePrivilege(string privilegeName)
         {
             IntPtr token;
-            if (OpenProcessToken(Process.GetCurrentProcess().Handle, 0x0020 | 0x0008, out token))
+            if (NativeMethods.OpenProcessToken(Process.GetCurrentProcess().Handle, 0x0020 | 0x0008, out token))
             {
                 long luid;
-                if (LookupPrivilegeValue(null, privilegeName, out luid))
+                if (NativeMethods.LookupPrivilegeValue(null, privilegeName, out luid))
                 {
-                    var tp = new TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = 0x00000002 };
-                    AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+                    var tp = new NativeMethods.TokenPrivileges { PrivilegeCount = 1, Luid = luid, Attributes = 0x00000002 };
+                    NativeMethods.AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
                 }
-                CloseHandle(token);
+                NativeMethods.CloseHandle(token);
             }
         }
 
@@ -1729,17 +1797,17 @@ namespace OptiGuille
                 {
                     if (suspendedProcesses.Contains(pid))
                     {
-                        NtResumeProcess(p.Handle);
+                        NativeMethods.NtResumeProcess(p.Handle);
                         suspendedProcesses.Remove(pid);
                     }
                     else
                     {
-                        NtSuspendProcess(p.Handle);
+                        NativeMethods.NtSuspendProcess(p.Handle);
                         suspendedProcesses.Add(pid);
                     }
                 }
             }
-            catch (Exception ex) { MessageBox.Show("No se pudo cambiar el estado del proceso: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("No se pudo cambiar el estado del proceso: " + ex.Message, "OptiMaster"); }
         }
 
         void FillProcessList(ModernTableControl table)
@@ -1801,7 +1869,7 @@ namespace OptiGuille
                     dlg.ShowDialog(this);
                 }
             }
-            catch (Exception ex) { MessageBox.Show("No se pudo cambiar la afinidad: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("No se pudo cambiar la afinidad: " + ex.Message, "OptiMaster"); }
         }
 
         // ==========================================
@@ -1825,10 +1893,10 @@ namespace OptiGuille
                 else if (res == DialogResult.No) BackupDrivers();
             }, new Padding(8, 0, 0, 12)), 1, 0);
 
-            grid.Controls.Add(FeatureCard("Salud S.M.A.R.T. de unidades", "Lee los sensores internos de tus unidades SSD NVMe y discos mecánicos para prevenir fallos físicos.", "Consultar estado S.M.A.R.T.", "DISK", UiTheme.Mint, delegate { ShowSmartStatus(); }, new Padding(0, 0, 8, 12)), 0, 1);
-            grid.Controls.Add(FeatureCard("Optimización de red TCP/IP", "Elimina el estrangulamiento multimedia (NetworkThrottlingIndex), prioriza paquetes de juego y purga DNS.", "Aplicar baja latencia", "BOLT", UiTheme.Purple, delegate { ApplyNetworkOptimization(); }, new Padding(8, 0, 0, 12)), 1, 1);
+            grid.Controls.Add(FeatureCard("Estado de las unidades", "Consulta el estado de tus unidades y detecta posibles problemas antes de que afecten a tus archivos.", "Consultar estado", "DISK", UiTheme.Mint, delegate { ShowSmartStatus(); }, new Padding(0, 0, 8, 12)), 0, 1);
+            grid.Controls.Add(FeatureCard("Modo de baja latencia", "Mejora la respuesta de la conexión durante las partidas.", "Aplicar perfil", "BOLT", UiTheme.Purple, delegate { ApplyNetworkOptimization(); }, new Padding(8, 0, 0, 12)), 1, 1);
 
-            grid.Controls.Add(FeatureCard("Reparador oficial de Windows", "Ejecuta diagnósticos automáticos SFC /scannow, DISM RestoreHealth o repara la tienda y caché de iconos.", "Abrir centro de reparación", "WRENCH", UiTheme.Amber, delegate { RunRepairMenu(); }, new Padding(0, 0, 8, 0)), 0, 2);
+            grid.Controls.Add(FeatureCard("Reparar Windows", "Soluciona problemas frecuentes del sistema y de sus aplicaciones.", "Abrir reparación", "WRENCH", UiTheme.Amber, delegate { RunRepairMenu(); }, new Padding(0, 0, 8, 0)), 0, 2);
             grid.Controls.Add(FeatureCard("Borrado seguro DoD y recuperación", "Destruye archivos confidenciales mediante 3 pasadas criptográficas o abre Windows File Recovery.", "Gestionar archivos", "SHIELD", UiTheme.Mint, delegate
             {
                 var choice = MessageBox.Show("Sí: Destruir un archivo con 3 pasadas irreversibles.\r\nNo: Recuperar archivos borrados con WinFR.", "Seguridad de datos", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
@@ -1906,7 +1974,7 @@ namespace OptiGuille
                 RunCommand("ipconfig.exe", "/flushdns");
                 MessageBox.Show("Perfil de red de baja latencia aplicado y respaldado.", "Optimización de Red");
             }
-            catch (Exception ex) { MessageBox.Show("Error al aplicar perfil de red: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("Error al aplicar perfil de red: " + ex.Message, "OptiMaster"); }
         }
 
         void RunRepairMenu()
@@ -1920,7 +1988,7 @@ namespace OptiGuille
             {
                 dlg.Close();
                 string iconDb = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IconCache.db");
-                try { if (File.Exists(iconDb)) File.Delete(iconDb); MessageBox.Show("Caché de iconos regenerada.", "OptiGuille"); } catch { }
+                try { if (File.Exists(iconDb)) File.Delete(iconDb); MessageBox.Show("Caché de iconos regenerada.", "OptiMaster"); } catch { }
             }));
             dlg.Controls.Add(stack);
             dlg.ShowDialog(this);
@@ -1940,11 +2008,11 @@ namespace OptiGuille
         {
             var page = NewModule();
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 270));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 250));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             var mapCard = new RoundedPanel { Dock = DockStyle.Fill, FillColor = UiTheme.CardBg, TopAccentColor = UiTheme.Cyan, Radius = 12, Padding = new Padding(22), Margin = new Padding(0, 0, 0, 14) };
-            mapCard.Controls.Add(new Label { Text = "Mapa de bloques de la unidad y optimizador TRIM", Font = new Font("Segoe UI Semibold", 12f, FontStyle.Bold), ForeColor = UiTheme.TextLight, BackColor = UiTheme.CardBg, AutoSize = true, Location = new Point(22, 14) });
+            mapCard.Controls.Add(new Label { Text = "Estado de la unidad y optimizador de Windows", Font = new Font("Segoe UI Semibold", 12f, FontStyle.Bold), ForeColor = UiTheme.TextLight, BackColor = UiTheme.CardBg, AutoSize = true, Location = new Point(22, 14) });
 
             var driveNames = new List<string>();
             foreach (string root in Environment.GetLogicalDrives())
@@ -1964,22 +2032,36 @@ namespace OptiGuille
                 Size = new Size(Math.Min(650, Math.Max(240, driveNames.Count * 185)), 38),
                 BackColor = UiTheme.CardBg
             };
-            var blockMap = new BlockMapControl
+            var driveStatus = new Label
             {
-                Location = new Point(22, 92),
-                Size = new Size(mapCard.Width - 44, 118),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
-            };
-            var legend = new Label
-            {
-                Text = "Azul: Bloques contiguos   |   Verde: Bloques optimizados (TRIM)   |   Ámbar: Fragmentados   |   Oscuro: Espacio libre",
                 ForeColor = UiTheme.TextMuted,
                 BackColor = UiTheme.CardBg,
-                AutoSize = true,
-                Location = new Point(22, 220)
+                Font = new Font("Segoe UI", 10f),
+                Location = new Point(24, 102),
+                Size = new Size(mapCard.Width - 48, 78),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
+            Action refreshDriveStatus = delegate
+            {
+                try
+                {
+                    string selected = driveSelector.SelectedItem;
+                    string root = selected.Substring(0, 2) + "\\";
+                    var drive = new DriveInfo(root);
+                    double totalGb = drive.TotalSize / 1073741824.0;
+                    double freeGb = drive.AvailableFreeSpace / 1073741824.0;
+                    double used = totalGb == 0 ? 0 : (totalGb - freeGb) * 100.0 / totalGb;
+                    driveStatus.Text = String.Format("Uso real: {0:0}%  ·  {1:0.0} GB libres de {2:0.0} GB\r\n\r\nOptimiza esta unidad para mantener su rendimiento.", used, freeGb, totalGb);
+                }
+                catch
+                {
+                    driveStatus.Text = "No se pudieron leer los datos actuales de esta unidad.";
+                }
+            };
+            driveSelector.SelectedIndexChanged += delegate { refreshDriveStatus(); };
+            refreshDriveStatus();
 
-            var optimize = new PillButton("Ejecutar TRIM / Optimizar")
+            var optimize = new PillButton("Optimizar unidad")
             {
                 Size = new Size(250, 38),
                 Location = new Point(mapCard.Width - 272, 44),
@@ -1993,12 +2075,12 @@ namespace OptiGuille
                 optimize.Enabled = false;
                 optimize.Text = "Optimizando " + root + "...";
                 await RunCommandVisibleAsync("defrag.exe", root + " /O", "Optimización de unidad " + root);
-                blockMap.ResetBlocks(true);
                 optimize.Text = "Unidad optimizada";
                 optimize.Enabled = true;
+                refreshDriveStatus();
             };
 
-            mapCard.Controls.AddRange(new Control[] { driveSelector, optimize, blockMap, legend });
+            mapCard.Controls.AddRange(new Control[] { driveSelector, optimize, driveStatus });
             layout.Controls.Add(mapCard, 0, 0);
 
             var bottomGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, BackColor = UiTheme.BgCanvas, Margin = Padding.Empty };
@@ -2007,7 +2089,7 @@ namespace OptiGuille
             bottomGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
             bottomGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
 
-            bottomGrid.Controls.Add(FeatureCard("Buscador de duplicados SHA-256", "Compara huellas criptográficas para detectar archivos idénticos aunque tengan distinto nombre.", "Analizar carpeta", "DISK", UiTheme.Cyan, delegate { FindDuplicatesAsync(); }, new Padding(0, 0, 8, 12)), 0, 0);
+            bottomGrid.Controls.Add(FeatureCard("Buscador de archivos duplicados", "Encuentra archivos iguales para que puedas liberar espacio.", "Analizar carpeta", "DISK", UiTheme.Cyan, delegate { FindDuplicatesAsync(); }, new Padding(0, 0, 8, 12)), 0, 0);
             bottomGrid.Controls.Add(FeatureCard("Escáner de archivos gigantes", "Localiza rápidamente instaladores, vídeos o volcados olvidados que superen los 250 MB.", "Buscar mayores de 250 MB", "CPU", UiTheme.Primary, delegate { FindLargeFilesAsync(); }, new Padding(8, 0, 0, 12)), 1, 0);
             bottomGrid.Controls.Add(FeatureCard("Limpiador de residuos AppData", "Rastrea y elimina carpetas huérfanas vacías que dejan los desinstaladores convencionales.", "Limpiar AppData residual", "RAM", UiTheme.Mint, delegate { ScanOrphanAppData(); }, new Padding(0, 0, 8, 0)), 0, 1);
             bottomGrid.Controls.Add(FeatureCard("Sensor de almacenamiento", "Configura las directivas nativas de limpieza automática de volúmenes en Windows 11.", "Abrir configuración", "WRENCH", UiTheme.Purple, delegate { Process.Start("ms-settings:storagesense"); }, new Padding(8, 0, 0, 0)), 1, 1);
@@ -2037,7 +2119,7 @@ namespace OptiGuille
 
             if (emptyDirs.Count == 0)
             {
-                MessageBox.Show("No se detectaron carpetas residuales vacías en AppData.", "OptiGuille");
+                MessageBox.Show("No se detectaron carpetas residuales vacías en AppData.", "OptiMaster");
                 return;
             }
 
@@ -2045,7 +2127,7 @@ namespace OptiGuille
             {
                 int removed = 0;
                 foreach (string d in emptyDirs) { try { Directory.Delete(d, true); removed++; } catch { } }
-                MessageBox.Show("Se eliminaron " + removed + " carpetas residuales.", "OptiGuille");
+                MessageBox.Show("Se eliminaron " + removed + " carpetas residuales.", "OptiMaster");
             }
         }
 
@@ -2112,7 +2194,7 @@ namespace OptiGuille
                 if (autoPowerToggle.Checked && String.IsNullOrWhiteSpace(gameProcessInput.Text))
                 {
                     autoPowerToggle.Checked = false;
-                    MessageBox.Show("Escribe el nombre del ejecutable (ej. FiveM.exe).", "OptiGuille");
+                    MessageBox.Show("Escribe el nombre del ejecutable (ej. FiveM.exe).", "OptiMaster");
                     return;
                 }
                 if (autoPowerToggle.Checked) powerPlanTimer.Start();
@@ -2128,7 +2210,7 @@ namespace OptiGuille
             actionRow.Controls.Add(restoreBtn);
             leftCol.Controls.Add(actionRow, 0, 6);
 
-            restoreStatus = new Label { Text = "Respaldo activo en ProgramData\\OptiGuille\\backup.json", ForeColor = UiTheme.Mint, AutoSize = true, Margin = new Padding(2, 8, 0, 0) };
+            restoreStatus = new Label { Text = "Se guardará una copia de seguridad de tus ajustes.", ForeColor = UiTheme.Mint, AutoSize = true, Margin = new Padding(2, 8, 0, 0) };
             leftCol.Controls.Add(restoreStatus, 0, 7);
 
             // COLUMNA DERECHA: SERVICIOS DE WINDOWS
@@ -2242,7 +2324,7 @@ namespace OptiGuille
                 if (doReg) regCleaned = CleanOrphanedRegistryEntries();
             });
 
-            try { SHEmptyRecycleBin(Handle, null, 0x00000001 | 0x00000002 | 0x00000004); } catch { }
+            try { NativeMethods.EmptyRecycleBin(Handle); } catch { }
             PurgeMemory(false);
 
             if (healthGauge != null) healthGauge.Value = 100;
@@ -2392,16 +2474,16 @@ namespace OptiGuille
                         }
                     }
                     File.Delete(path);
-                    MessageBox.Show("Archivo sobrescrito y destruido correctamente.", "OptiGuille");
+                    MessageBox.Show("Archivo sobrescrito y destruido correctamente.", "OptiMaster");
                 }
-                catch (Exception ex) { MessageBox.Show("No se pudo destruir el archivo: " + ex.Message, "OptiGuille"); }
+                catch (Exception ex) { MessageBox.Show("No se pudo destruir el archivo: " + ex.Message, "OptiMaster"); }
             }
         }
 
         void TryFileRecovery()
         {
             try { Process.Start("ms-windows-store://pdp/?ProductId=9N26S50LN705"); }
-            catch (Exception ex) { MessageBox.Show(ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "OptiMaster"); }
         }
 
         async void FindDuplicatesAsync()
@@ -2462,7 +2544,7 @@ namespace OptiGuille
                     return list;
                 });
 
-                if (candidates.Count == 0) { MessageBox.Show("No se encontraron archivos duplicados.", "OptiGuille"); return; }
+                if (candidates.Count == 0) { MessageBox.Show("No se encontraron archivos duplicados.", "OptiMaster"); return; }
 
                 var dlg = new Form { Text = "Duplicados encontrados (" + candidates.Count + ")", Width = 840, Height = 540, StartPosition = FormStartPosition.CenterParent, BackColor = UiTheme.BgCanvas, ForeColor = UiTheme.TextLight };
                 var chkList = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, BackColor = UiTheme.CardBg, ForeColor = UiTheme.TextLight, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 9.5f) };
@@ -2480,7 +2562,7 @@ namespace OptiGuille
                         }
                         catch { }
                     }
-                    MessageBox.Show("Se movieron " + c + " archivos duplicados a la Papelera.", "OptiGuille");
+                    MessageBox.Show("Se movieron " + c + " archivos duplicados a la Papelera.", "OptiMaster");
                     dlg.Close();
                 };
                 dlg.Controls.Add(chkList);
@@ -2612,25 +2694,13 @@ namespace OptiGuille
         AppBackup LoadBackup()
         {
             if (backup != null) return backup;
-            if (File.Exists(backupPath))
-            {
-                try
-                {
-                    using (var stream = File.OpenRead(backupPath))
-                        backup = (AppBackup)new DataContractJsonSerializer(typeof(AppBackup)).ReadObject(stream);
-                }
-                catch { }
-            }
-            if (backup == null) backup = new AppBackup();
-            if (backup.Registry == null) backup.Registry = new Dictionary<string, RegistrySnapshot>();
-            if (backup.Services == null) backup.Services = new Dictionary<string, List<ServiceSnapshot>>();
+            backup = backupStore.Load();
             return backup;
         }
 
         void SaveBackup()
         {
-            using (var stream = File.Create(backupPath))
-                new DataContractJsonSerializer(typeof(AppBackup)).WriteObject(stream, LoadBackup());
+            backupStore.Save(LoadBackup());
         }
 
         RegistrySnapshot ReadDword(string keyPath, string name)
@@ -2703,25 +2773,14 @@ namespace OptiGuille
                 }
                 if (restoreStatus != null)
                     restoreStatus.Text = "Ajustes aplicados y respaldados.";
-                MessageBox.Show("Ajustes de rendimiento aplicados correctamente.", "OptiGuille", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Ajustes de rendimiento aplicados correctamente.", "OptiMaster", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-            catch (Exception ex) { MessageBox.Show("No se pudieron aplicar todos los ajustes: " + ex.Message, "OptiGuille", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            catch (Exception ex) { MessageBox.Show("No se pudieron aplicar todos los ajustes: " + ex.Message, "OptiMaster", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         }
 
         string RunCommand(string file, string args)
         {
-            try
-            {
-                var start = new ProcessStartInfo(file, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-                using (var process = Process.Start(start))
-                {
-                    var outputTask = process.StandardOutput.ReadToEndAsync();
-                    var errTask = process.StandardError.ReadToEndAsync();
-                    process.WaitForExit();
-                    return outputTask.Result + errTask.Result;
-                }
-            }
-            catch (Exception ex) { return ex.Message; }
+            return processRunner.Run(file, args);
         }
 
         string ReadComponentState(ComponentSpec spec)
@@ -2756,7 +2815,7 @@ namespace OptiGuille
         void ToggleComponent(ComponentSpec spec, Label status, Button button)
         {
             string current = ReadComponentState(spec);
-            if (current == "No disponible") { MessageBox.Show("Este servicio no está presente en esta edición de Windows.", "OptiGuille"); return; }
+            if (current == "No disponible") { MessageBox.Show("Este servicio no está presente en esta edición de Windows.", "OptiMaster"); return; }
             bool enable = current == "Desactivado";
             string prompt = enable ? "¿Activar " + spec.Title + "?" : "¿Desactivar " + spec.Title + "?\r\n\r\n" + spec.Warning;
             if (MessageBox.Show(prompt, "Confirmar cambio", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
@@ -2810,7 +2869,7 @@ namespace OptiGuille
                 status.ForeColor = st == "Desactivado" ? UiTheme.Amber : UiTheme.Mint;
                 button.Text = st == "Desactivado" ? "Activar" : "Desactivar";
             }
-            catch (Exception ex) { MessageBox.Show("No se pudo cambiar el servicio: " + ex.Message, "OptiGuille"); }
+            catch (Exception ex) { MessageBox.Show("No se pudo cambiar el servicio: " + ex.Message, "OptiMaster"); }
         }
 
         void RestoreAll()
@@ -2859,15 +2918,15 @@ namespace OptiGuille
                 if (powerPlanTimer != null) powerPlanTimer.Stop();
                 powerAutoApplied = false;
                 if (autoPowerToggle != null) autoPowerToggle.Checked = false;
-                if (File.Exists(backupPath)) File.Delete(backupPath);
+                backupStore.Clear();
                 backup = null;
                 if (restoreStatus != null) restoreStatus.Text = "Valores originales restaurados.";
-                MessageBox.Show("Ajustes, red, políticas de Windows Update, plan de energía y servicios restaurados.", "OptiGuille");
+                MessageBox.Show("Ajustes, red, políticas de Windows Update, plan de energía y servicios restaurados.", "OptiMaster");
             }
             catch (Exception ex)
             {
                 if (restoreStatus != null) restoreStatus.Text = "Error en restauración: " + ex.Message;
-                MessageBox.Show("Error al restaurar: " + ex.Message, "OptiGuille");
+                MessageBox.Show("Error al restaurar: " + ex.Message, "OptiMaster");
             }
         }
     }

@@ -6,26 +6,29 @@ using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace OptiGuille
+namespace OptiMaster
 {
     internal static class UiTheme
     {
-        public static readonly Color BgSidebar = Color.FromArgb(9, 13, 22);
-        public static readonly Color BgCanvas = Color.FromArgb(13, 18, 30);
-        public static readonly Color CardBg = Color.FromArgb(20, 27, 45);
-        public static readonly Color CardAlt = Color.FromArgb(16, 22, 37);
-        public static readonly Color CardHover = Color.FromArgb(28, 38, 62);
-        public static readonly Color Border = Color.FromArgb(36, 49, 78);
-        public static readonly Color BorderBright = Color.FromArgb(56, 139, 253);
-        public static readonly Color Primary = Color.FromArgb(59, 130, 246);
-        public static readonly Color Cyan = Color.FromArgb(6, 182, 212);
-        public static readonly Color Mint = Color.FromArgb(16, 185, 129);
-        public static readonly Color Purple = Color.FromArgb(139, 92, 246);
-        public static readonly Color Amber = Color.FromArgb(245, 158, 11);
+        // Base Space Gray. Midnight Purple se reserva para foco, acciones y telemetría.
+        public static readonly Color BgSidebar = Color.FromArgb(36, 38, 44);
+        public static readonly Color BgCanvas = Color.FromArgb(46, 48, 54);
+        public static readonly Color CardBg = Color.FromArgb(57, 60, 67);
+        public static readonly Color CardAlt = Color.FromArgb(50, 53, 59);
+        public static readonly Color CardHover = Color.FromArgb(68, 71, 79);
+        public static readonly Color Border = Color.FromArgb(85, 88, 97);
+        public static readonly Color BorderBright = Color.FromArgb(142, 102, 213);
+        public static readonly Color Primary = Color.FromArgb(57, 31, 99);
+        public static readonly Color Cyan = Color.FromArgb(157, 122, 226);
+        public static readonly Color Mint = Color.FromArgb(130, 207, 165);
+        public static readonly Color Purple = Color.FromArgb(100, 59, 158);
+        public static readonly Color Amber = Color.FromArgb(240, 183, 91);
         public static readonly Color Danger = Color.FromArgb(239, 68, 68);
-        public static readonly Color TextLight = Color.FromArgb(248, 250, 252);
-        public static readonly Color TextMuted = Color.FromArgb(148, 163, 184);
-        public static readonly Color TrackDark = Color.FromArgb(10, 14, 24);
+        public static readonly Color TextLight = Color.FromArgb(247, 246, 250);
+        public static readonly Color TextMuted = Color.FromArgb(190, 188, 198);
+        public static readonly Color TrackDark = Color.FromArgb(39, 41, 47);
+        public static readonly Color PurpleSoft = Color.FromArgb(74, 51, 108);
+        public static readonly Color PurpleGlow = Color.FromArgb(184, 151, 244);
     }
 
     internal static class DwmNative
@@ -37,6 +40,8 @@ namespace OptiGuille
         {
             try
             {
+                int darkMode = 1;
+                DwmSetWindowAttribute(form.Handle, 20, ref darkMode, sizeof(int));
                 int preference = 2;
                 DwmSetWindowAttribute(form.Handle, 33, ref preference, sizeof(int));
                 int borderColor = ColorTranslator.ToWin32(UiTheme.Border);
@@ -154,6 +159,7 @@ namespace OptiGuille
         string title = "Limpiador de Basura";
         string subtitle = "Panel de rendimiento y mantenimiento en tiempo real";
         int hoverBtn = -1;
+        public bool ShowWindowControls = false;
 
         public event Action MinimizeClicked;
         public event Action MaximizeClicked;
@@ -194,6 +200,11 @@ namespace OptiGuille
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (!ShowWindowControls)
+            {
+                Cursor = Cursors.Default;
+                return;
+            }
             int found = -1;
             for (int i = 0; i < 3; i++)
             {
@@ -225,6 +236,7 @@ namespace OptiGuille
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (!ShowWindowControls) return;
             if (e.Button != MouseButtons.Left) return;
 
             for (int i = 0; i < 3; i++)
@@ -266,30 +278,30 @@ namespace OptiGuille
 
             using (var fBadge = new Font("Segoe UI Semibold", 8f, FontStyle.Bold))
             {
-                string badgeText = "MOTOR EN TIEMPO REAL";
+                string badgeText = "NÚCLEO ONLINE";
                 Size textSz = TextRenderer.MeasureText(badgeText, fBadge);
                 int badgeW = textSz.Width + 38;
                 int badgeH = 28;
-                var badgeRect = new Rectangle(Width - 165 - badgeW, (Height - badgeH) / 2, badgeW, badgeH);
+                var badgeRect = new Rectangle(Width - (ShowWindowControls ? 165 : 28) - badgeW, (Height - badgeH) / 2, badgeW, badgeH);
 
                 if (badgeRect.X > 340)
                 {
                     using (var path = UiShape.Round(badgeRect, badgeH / 2))
-                    using (var bg = new SolidBrush(Color.FromArgb(16, 36, 46)))
-                    using (var pen = new Pen(Color.FromArgb(20, 120, 100), 1f))
+                    using (var bg = new SolidBrush(UiTheme.PurpleSoft))
+                    using (var pen = new Pen(UiTheme.PurpleGlow, 1f))
                     {
                         e.Graphics.FillPath(bg, path);
                         e.Graphics.DrawPath(pen, path);
                     }
-                    using (var dot = new SolidBrush(UiTheme.Mint))
+                    using (var dot = new SolidBrush(UiTheme.Cyan))
                         e.Graphics.FillEllipse(dot, badgeRect.X + 12, badgeRect.Y + (badgeH - 8) / 2, 8, 8);
 
                     var textRect = new Rectangle(badgeRect.X + 24, badgeRect.Y, badgeRect.Width - 28, badgeH);
-                    TextRenderer.DrawText(e.Graphics, badgeText, fBadge, textRect, UiTheme.Mint, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(e.Graphics, badgeText, fBadge, textRect, UiTheme.Cyan, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 }
             }
 
-            for (int i = 0; i < 3; i++)
+            if (ShowWindowControls) for (int i = 0; i < 3; i++)
             {
                 Rectangle r = GetButtonRect(i);
                 bool isHovered = hoverBtn == i;
@@ -321,7 +333,7 @@ namespace OptiGuille
                 }
             }
 
-            using (var linePen = new Pen(Color.FromArgb(24, 34, 54), 1f))
+            using (var linePen = new Pen(UiTheme.Border, 1f))
                 e.Graphics.DrawLine(linePen, 28, Height - 1, Width - 16, Height - 1);
         }
     }
@@ -406,7 +418,7 @@ namespace OptiGuille
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            Color accent = kind == "RAM" ? UiTheme.Mint : (kind == "DISK" ? UiTheme.Cyan : UiTheme.Primary);
+            Color accent = kind == "RAM" ? UiTheme.Cyan : (kind == "DISK" ? UiTheme.PurpleGlow : UiTheme.Purple);
             var rect = new Rectangle(0, 0, Width - 1, Height - 1);
 
             using (var path = UiShape.Round(rect, 12))
@@ -529,8 +541,8 @@ namespace OptiGuille
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
             var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color fill = isChecked ? Color.FromArgb(20, 38, 68) : (hover ? UiTheme.CardHover : UiTheme.CardAlt);
-            Color border = isChecked ? UiTheme.Primary : UiTheme.Border;
+            Color fill = isChecked ? UiTheme.PurpleSoft : (hover ? UiTheme.CardHover : UiTheme.CardAlt);
+            Color border = isChecked ? UiTheme.Cyan : UiTheme.Border;
 
             using (var path = UiShape.Round(rect, 10))
             using (var brush = new SolidBrush(fill))
@@ -561,7 +573,7 @@ namespace OptiGuille
             {
                 if (isChecked)
                 {
-                    using (var brush = new SolidBrush(UiTheme.Mint))
+                    using (var brush = new SolidBrush(UiTheme.Cyan))
                         e.Graphics.FillPath(brush, path);
                     using (var pen = new Pen(Color.FromArgb(10, 20, 30), 2.2f))
                     {
@@ -615,8 +627,8 @@ namespace OptiGuille
             {
                 if (IsPrimary)
                 {
-                    Color c1 = hover ? Color.FromArgb(79, 150, 255) : UiTheme.Primary;
-                    Color c2 = hover ? Color.FromArgb(26, 205, 149) : UiTheme.Mint;
+                    Color c1 = hover ? UiTheme.Purple : UiTheme.Primary;
+                    Color c2 = hover ? UiTheme.PurpleGlow : UiTheme.Cyan;
                     using (var brush = new LinearGradientBrush(rect, c1, c2, LinearGradientMode.Horizontal))
                         e.Graphics.FillPath(brush, path);
                 }
@@ -632,9 +644,9 @@ namespace OptiGuille
                 }
                 else
                 {
-                    Color bg = hover ? Color.FromArgb(38, 52, 82) : Color.FromArgb(26, 36, 58);
+                    Color bg = hover ? UiTheme.CardHover : UiTheme.CardAlt;
                     using (var brush = new SolidBrush(bg))
-                    using (var pen = new Pen(hover ? UiTheme.Primary : UiTheme.Border, 1f))
+                    using (var pen = new Pen(hover ? UiTheme.Cyan : UiTheme.Border, 1f))
                     {
                         e.Graphics.FillPath(brush, path);
                         e.Graphics.DrawPath(pen, path);
@@ -672,8 +684,8 @@ namespace OptiGuille
 
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color c1 = hover ? Color.FromArgb(80, 155, 255) : UiTheme.Primary;
-            Color c2 = hover ? Color.FromArgb(30, 215, 155) : UiTheme.Mint;
+            Color c1 = hover ? UiTheme.Purple : UiTheme.Primary;
+            Color c2 = hover ? UiTheme.PurpleGlow : UiTheme.Cyan;
 
             using (var path = UiShape.Round(rect, Height / 2))
             using (var brush = new LinearGradientBrush(rect, c1, c2, LinearGradientMode.Horizontal))
@@ -779,7 +791,7 @@ namespace OptiGuille
                 if (i == selectedIndex)
                 {
                     using (var p = UiShape.Round(r, 6))
-                    using (var b = new LinearGradientBrush(r, UiTheme.Primary, Color.FromArgb(30, 100, 210), LinearGradientMode.Horizontal))
+                    using (var b = new LinearGradientBrush(r, UiTheme.Primary, UiTheme.Purple, LinearGradientMode.Horizontal))
                         e.Graphics.FillPath(b, p);
                 }
                 else if (i == hoverIndex)
@@ -836,7 +848,7 @@ namespace OptiGuille
             {
                 if (isChecked)
                 {
-                    using (var brush = new LinearGradientBrush(rect, UiTheme.Primary, UiTheme.Mint, LinearGradientMode.Horizontal))
+                    using (var brush = new LinearGradientBrush(rect, UiTheme.Primary, UiTheme.Cyan, LinearGradientMode.Horizontal))
                         e.Graphics.FillPath(brush, path);
                 }
                 else
@@ -892,47 +904,44 @@ namespace OptiGuille
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            var rect = new Rectangle(12, 2, Width - 24, Height - 4);
+            var rect = new Rectangle(12, 3, Width - 24, Height - 6);
 
             if (active || hover)
             {
-                Color bg = active ? Color.FromArgb(20, 32, 56) : Color.FromArgb(15, 22, 38);
+                Color bg = active ? UiTheme.PurpleSoft : UiTheme.CardHover;
                 using (var path = UiShape.Round(rect, 10))
                 using (var brush = new SolidBrush(bg))
                     e.Graphics.FillPath(brush, path);
 
                 if (active)
                 {
-                    using (var pen = new Pen(Color.FromArgb(45, 90, 170), 1f))
+                    using (var pen = new Pen(UiTheme.PurpleGlow, 1f))
                     using (var path = UiShape.Round(rect, 10))
                         e.Graphics.DrawPath(pen, path);
 
-                    using (var accentBrush = new LinearGradientBrush(new Rectangle(12, 10, 4, Height - 20), UiTheme.Cyan, UiTheme.Primary, LinearGradientMode.Vertical))
+                    using (var accentBrush = new SolidBrush(UiTheme.Cyan))
                     using (var barPath = UiShape.Round(new Rectangle(12, 10, 4, Height - 20), 2))
                         e.Graphics.FillPath(accentBrush, barPath);
                 }
             }
 
-            var iconBox = new Rectangle(22, (Height - 32) / 2, 32, 32);
+            var iconBox = new Rectangle(24, (Height - 30) / 2, 30, 30);
             Color iconColor = active ? UiTheme.Cyan : (hover ? UiTheme.TextLight : UiTheme.TextMuted);
             if (active)
             {
-                using (var p = UiShape.Round(iconBox, 8))
-                using (var b = new SolidBrush(Color.FromArgb(28, UiTheme.Cyan)))
+                using (var p = UiShape.Round(iconBox, 9))
+                using (var b = new SolidBrush(UiTheme.Primary))
                     e.Graphics.FillPath(b, p);
             }
 
             string[] kinds = { "DASH", "BOLT", "RAM", "SHIELD", "GPU", "DISK", "WRENCH" };
             UiShape.DrawVectorIcon(e.Graphics, kinds[icon % kinds.Length], iconBox, iconColor);
 
-            int textW = Width - 78;
-            int topY = (Height - 36) / 2;
+            int textW = Width - 82;
             using (var fMain = new Font("Segoe UI Semibold", 9.5f, active ? FontStyle.Bold : FontStyle.Regular))
-            using (var fSub = new Font("Segoe UI", 7.6f))
             {
                 Color cMain = active ? Color.White : Color.FromArgb(210, 220, 235);
-                TextRenderer.DrawText(e.Graphics, caption, fMain, new Rectangle(62, topY, textW, 20), cMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-                TextRenderer.DrawText(e.Graphics, subtitle, fSub, new Rectangle(62, topY + 18, textW, 18), UiTheme.TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(e.Graphics, caption, fMain, new Rectangle(66, 0, textW, Height), cMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             }
         }
     }
@@ -952,21 +961,31 @@ namespace OptiGuille
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            var badgeRect = new Rectangle(18, 16, 44, 44);
-            using (var path = UiShape.Round(badgeRect, 12))
-            using (var brush = new LinearGradientBrush(badgeRect, UiTheme.Primary, UiTheme.Mint, LinearGradientMode.ForwardDiagonal))
+            int badgeSize = Math.Min(50, Math.Max(40, Height - 30));
+            var badgeRect = new Rectangle(18, (Height - badgeSize) / 2, badgeSize, badgeSize);
+            using (var halo = new SolidBrush(Color.FromArgb(70, UiTheme.Cyan)))
+                e.Graphics.FillEllipse(halo, badgeRect.X - 5, badgeRect.Y - 5, badgeRect.Width + 10, badgeRect.Height + 10);
+            using (var path = UiShape.Round(badgeRect, 14))
+            using (var brush = new LinearGradientBrush(badgeRect, UiTheme.Primary, UiTheme.Purple, LinearGradientMode.ForwardDiagonal))
                 e.Graphics.FillPath(brush, path);
 
-            UiShape.DrawVectorIcon(e.Graphics, "BOLT", badgeRect, Color.White);
+            int cx = badgeRect.X + badgeRect.Width / 2;
+            int cy = badgeRect.Y + badgeRect.Height / 2;
+            using (var bolt = new SolidBrush(Color.White))
+                e.Graphics.FillPolygon(bolt, new[] {
+                    new Point(cx + 4, cy - 19), new Point(cx - 12, cy + 2), new Point(cx - 2, cy + 2),
+                    new Point(cx - 7, cy + 20), new Point(cx + 14, cy - 5), new Point(cx + 4, cy - 5)
+                });
 
             using (var fBrand = new Font("Segoe UI", 15f, FontStyle.Bold))
             using (var fTag = new Font("Segoe UI Semibold", 7.2f, FontStyle.Bold))
             {
                 int xOpti = 70;
-                TextRenderer.DrawText(e.Graphics, "Opti", fBrand, new Point(xOpti, 12), Color.White, TextFormatFlags.NoPadding);
+                int yBrand = Math.Max(10, (Height - 42) / 2);
+                TextRenderer.DrawText(e.Graphics, "Opti", fBrand, new Point(xOpti, yBrand), Color.White, TextFormatFlags.NoPadding);
                 Size szOpti = TextRenderer.MeasureText(e.Graphics, "Opti", fBrand, Size.Empty, TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(e.Graphics, "Guille", fBrand, new Point(xOpti + szOpti.Width + 1, 12), UiTheme.Cyan, TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(e.Graphics, "PRO GAMING & OS SUITE", fTag, new Point(71, 42), UiTheme.TextMuted, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, "Master", fBrand, new Point(xOpti + szOpti.Width + 1, yBrand), UiTheme.Cyan, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, "SYSTEM PERFORMANCE STUDIO", fTag, new Point(71, yBrand + 28), UiTheme.TextMuted, TextFormatFlags.NoPadding);
             }
         }
     }
@@ -1002,7 +1021,7 @@ namespace OptiGuille
 
             int cx = Width / 2, cy = Height / 2;
             int tickRadius = d / 2 + 10;
-            using (var tickPen = new Pen(Color.FromArgb(40, 60, 95), 1.5f))
+            using (var tickPen = new Pen(UiTheme.Border, 1.5f))
             {
                 for (int i = 0; i < 36; i++)
                 {
@@ -1021,7 +1040,7 @@ namespace OptiGuille
 
             if (value > 0)
             {
-                using (var brush = new LinearGradientBrush(r, UiTheme.Cyan, UiTheme.Mint, LinearGradientMode.ForwardDiagonal))
+                using (var brush = new LinearGradientBrush(r, UiTheme.Primary, UiTheme.Cyan, LinearGradientMode.ForwardDiagonal))
                 using (var p = new Pen(brush, penW))
                 {
                     p.StartCap = LineCap.Round;
@@ -1040,7 +1059,7 @@ namespace OptiGuille
             {
                 int topY = cy - (compact ? 26 : 34);
                 TextRenderer.DrawText(e.Graphics, value + "%", fVal, new Rectangle(0, topY, Width, compact ? 30 : 40), UiTheme.TextLight, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                TextRenderer.DrawText(e.Graphics, StatusTitle, fStat, new Rectangle(0, cy + (compact ? 4 : 8), Width, 18), UiTheme.Mint, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                TextRenderer.DrawText(e.Graphics, StatusTitle, fStat, new Rectangle(0, cy + (compact ? 4 : 8), Width, 18), UiTheme.Cyan, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 TextRenderer.DrawText(e.Graphics, CenterCaption, fCap, new Rectangle(0, cy + (compact ? 18 : 24), Width, 18), UiTheme.TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
         }
@@ -1182,7 +1201,7 @@ namespace OptiGuille
                 var oldClip = e.Graphics.Clip;
                 e.Graphics.SetClip(path);
 
-                using (var hBrush = new SolidBrush(Color.FromArgb(14, 20, 34)))
+                using (var hBrush = new SolidBrush(UiTheme.CardAlt))
                     e.Graphics.FillRectangle(hBrush, 0, 0, Width, HeaderHeight);
 
                 float totalWeight = 0;
@@ -1220,7 +1239,7 @@ namespace OptiGuille
                         bool isSel = rowIdx == selectedIndex;
                         bool isHov = rowIdx == hoverIndex;
 
-                        Color rowBg = isSel ? Color.FromArgb(26, 46, 82) : (isHov ? UiTheme.CardHover : (rowIdx % 2 == 0 ? UiTheme.CardBg : UiTheme.CardAlt));
+                        Color rowBg = isSel ? UiTheme.PurpleSoft : (isHov ? UiTheme.CardHover : (rowIdx % 2 == 0 ? UiTheme.CardBg : UiTheme.CardAlt));
                         using (var rb = new SolidBrush(rowBg))
                             e.Graphics.FillRectangle(rb, rowRect);
 
@@ -1317,58 +1336,4 @@ namespace OptiGuille
         }
     }
 
-    public class BlockMapControl : Control
-    {
-        readonly int[] states = new int[96];
-        readonly Random rng = new Random(42);
-
-        public BlockMapControl()
-        {
-            DoubleBuffered = true;
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque | ControlStyles.ResizeRedraw, true);
-            BackColor = UiTheme.CardBg;
-            ResetBlocks(false);
-        }
-
-        public void ResetBlocks(bool optimized)
-        {
-            for (int i = 0; i < states.Length; i++)
-            {
-                if (optimized)
-                    states[i] = i < 74 ? (i % 3 == 0 ? 2 : 1) : 0;
-                else
-                    states[i] = rng.Next(0, 10) < 2 ? 3 : (rng.Next(0, 10) < 6 ? 1 : (rng.Next(0, 10) < 8 ? 2 : 0));
-            }
-            Invalidate();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            Color clearCol = Parent != null ? Parent.BackColor : UiTheme.CardBg;
-            e.Graphics.Clear(clearCol);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-
-            int cols = 24, rows = 4;
-            int pad = 5;
-            int cellW = Math.Max(8, (Width - (cols - 1) * pad) / cols);
-            int cellH = Math.Max(8, (Height - (rows - 1) * pad) / rows);
-
-            for (int r = 0; r < rows; r++)
-            {
-                for (int c = 0; c < cols; c++)
-                {
-                    int idx = r * cols + c;
-                    Color color = UiTheme.TrackDark;
-                    if (states[idx] == 1) color = UiTheme.Primary;
-                    else if (states[idx] == 2) color = UiTheme.Mint;
-                    else if (states[idx] == 3) color = UiTheme.Amber;
-
-                    var rect = new Rectangle(c * (cellW + pad), r * (cellH + pad), cellW, cellH);
-                    using (var path = UiShape.Round(rect, 4))
-                    using (var b = new SolidBrush(color))
-                        e.Graphics.FillPath(b, path);
-                }
-            }
-        }
-    }
 }
